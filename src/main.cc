@@ -127,14 +127,18 @@ class SipeedTOF_MSA010_Publisher : public rclcpp::Node {
     std::string s;
     std::stringstream sstream;
     frame_t *f;
+    int retries = 0;
   _more:
     ser >> s;
     if (s.empty()) {
       return;
     }
     f = handle_process(s);
-    if (!f) {
+    if (!f && ++retries < 10) {
       goto _more;
+    }
+    if (!f) {
+      return;
     }
     // cout << f << endl;
     uint8_t rows, cols, *depth;
