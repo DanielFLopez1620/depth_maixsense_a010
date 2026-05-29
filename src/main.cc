@@ -151,7 +151,7 @@ class SipeedTOF_MSA010_Publisher : public rclcpp::Node {
 
     std_msgs::msg::Header header;
     header.stamp = this->get_clock()->now();
-    header.frame_id = "tof";
+    header.frame_id = "camera_link_optical";
 
     sensor_msgs::msg::Image msg_depth =
         *cv_bridge::CvImage(header, "mono8", md).toImageMsg().get();
