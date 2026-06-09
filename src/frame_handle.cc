@@ -20,7 +20,12 @@ frame_t *handle_process(std::string s) {
   vecChar.insert(vecChar.end(), s.cbegin(), s.cend());
 
   if (vecChar.size() > 3u * (100u * 100u + FRAME_HEAD_SIZE + FRAME_CHECKSUM_SIZE + FRAME_END_SIZE)) {
-    vecChar.clear();
+    // Lost sync or backed up: instead of throwing the whole buffer away (which
+    // destroys alignment and stalls recovery), keep only the most recent
+    // frame-worth so the next header can still be found.
+    const size_t keep =
+        100u * 100u + FRAME_HEAD_SIZE + FRAME_CHECKSUM_SIZE + FRAME_END_SIZE;
+    std::vector<uint8_t>(vecChar.end() - keep, vecChar.end()).swap(vecChar);
     goto __finished;
   }
 

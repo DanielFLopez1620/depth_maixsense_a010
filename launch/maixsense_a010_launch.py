@@ -10,7 +10,9 @@ from launch.substitutions import LaunchConfiguration
 
 def generate_launch_description():
     package_name = 'depth_maixsense_a010'
-    rviz_config_path = os.path.join(get_package_share_directory(package_name), 'rviz', 'maix.rviz')
+    # Camera-only launch (no TF tree): use the optical config whose Fixed Frame
+    # is camera_link_optical, so the cloud renders even without any robot TF.
+    rviz_config_path = os.path.join(get_package_share_directory(package_name), 'rviz', 'maix_optical.rviz')
     
     return LaunchDescription([
         DeclareLaunchArgument(
