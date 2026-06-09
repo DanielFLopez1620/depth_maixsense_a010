@@ -12,6 +12,7 @@
 ## Table of Contents
 - [About](#-about)
 - [How to Build](#-how-to-build)
+- [Display Variant](#-display-variant)
 - [udev Rules](#-udev-rules)
 - [License](#-license)
 
@@ -46,6 +47,21 @@ To launch the camera node with RViz:
 ```shell
 ros2 launch depth_maixsense_a010 maixsense_a010_launch.py
 ```
+
+## 🖥️ Display Variant
+
+The MaixSense A010 comes in variants **with** and **without** the onboard LCD. The driver tells the camera where to send its output via the `AT+DISP=<n>` command, which is a bitfield of output targets (`bit0 = LCD`, `bit1 = USB`, `bit2 = UART`). The frame stream this driver reads always travels over the **USB** bit, so streaming works on both variants; the only difference is whether the camera also renders to its LCD.
+
+This is controlled by a single compile-time flag at the top of [`src/main.cc`](src/main.cc):
+
+```cpp
+#define MAIXSENSE_HAS_DISPLAY 0   // 1 if your unit has the LCD, 0 if it does not
+```
+
+- **`1`** → `AT+DISP=3` (LCD + USB). Use this if your unit has the screen.
+- **`0`** → `AT+DISP=2` (USB only). Use this for screenless units; it also avoids the camera spending time rendering to a non-existent LCD, which is helpful on the Raspberry Pi 4.
+
+Set the flag to match your hardware and rebuild the package.
 
 > **Note for Raspberry Pi 4 users:** The MaixSense A010 may require more current than a standard RPi4 USB 2.0 port can reliably supply. If the node stops publishing after 30–60 seconds or fails to initialize, use a **powered USB hub** between the RPi4 and the camera.
 

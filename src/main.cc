@@ -19,6 +19,24 @@ extern frame_t *handle_process(std::string s);
 
 using namespace std::chrono_literals;
 
+// ---------------------------------------------------------------------------
+// Hardware variant: set to 1 if your MaixSense unit has the onboard LCD,
+// or 0 if it does not (e.g. a screenless module).
+//
+// AT+DISP=<n> is a bitfield of output targets: bit0=LCD, bit1=USB, bit2=UART.
+// The frame stream this driver reads travels over the USB bit (bit1), so it
+// stays enabled in both cases; the macro only toggles the LCD bit (bit0).
+// ---------------------------------------------------------------------------
+#define MAIXSENSE_HAS_DISPLAY 0
+
+#if MAIXSENSE_HAS_DISPLAY
+#define AT_DISP_INIT "AT+DISP=1\r"    // config phase: LCD on
+#define AT_DISP_STREAM "AT+DISP=3\r"  // stream: LCD + USB
+#else
+#define AT_DISP_INIT "AT+DISP=0\r"    // config phase: no LCD
+#define AT_DISP_STREAM "AT+DISP=2\r"  // stream: USB only
+#endif
+
 class SipeedTOF_MSA010_Publisher : public rclcpp::Node {
 #define ser (*pser)
  private:
@@ -42,13 +60,13 @@ class SipeedTOF_MSA010_Publisher : public rclcpp::Node {
     std::cout << std::endl;
     std::cout << "finish: " << "AT+ISP=0" << std::endl;
 
-    ser << "AT+DISP=1\r";
+    ser << AT_DISP_INIT;
     do {
       ser >> s;
-      std::cout << "AT+DISP=1: get dummy: " << s.size() << "\r";
+      std::cout << "AT+DISP(init): get dummy: " << s.size() << "\r";
     } while(!s.empty());
     std::cout << std::endl;
-    std::cout << "finish: " << "AT+DISP=1" << std::endl;
+    std::cout << "finish: AT+DISP(init)" << std::endl;
 
     ser << "AT+ISP=1\r";
     do {
@@ -100,7 +118,7 @@ class SipeedTOF_MSA010_Publisher : public rclcpp::Node {
     /* do not delete it. It is waiting */
     ser >> s;
 
-    ser << "AT+DISP=3\r";
+    ser << AT_DISP_STREAM;
     ser >> s;
     if (s.compare("OK\r\n")) {
       // not this serial port

@@ -18,12 +18,19 @@ def generate_launch_description():
             default_value=rviz_config_path,
             description='Ruta al archivo de configuración de RViz'
         ),
-        
+
+        DeclareLaunchArgument(
+            'device',
+            default_value='/dev/ttyUSB0',
+            description='Puerto serial de la cámara MaixSense A010'
+        ),
+
         Node(
             package=package_name,
             executable='publisher',
             name='depth_maixsense_a010_publisher',
-            output='screen'
+            output='screen',
+            parameters=[{'device': LaunchConfiguration('device')}]
         ),
         
         Node(
