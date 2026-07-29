@@ -19,6 +19,16 @@ frame_t *handle_process(std::string s) {
 
   vecChar.insert(vecChar.end(), s.cbegin(), s.cend());
 
+  if (vecChar.size() > 3u * (100u * 100u + FRAME_HEAD_SIZE + FRAME_CHECKSUM_SIZE + FRAME_END_SIZE)) {
+    // Lost sync or backed up: instead of throwing the whole buffer away (which
+    // destroys alignment and stalls recovery), keep only the most recent
+    // frame-worth so the next header can still be found.
+    const size_t keep =
+        100u * 100u + FRAME_HEAD_SIZE + FRAME_CHECKSUM_SIZE + FRAME_END_SIZE;
+    std::vector<uint8_t>(vecChar.end() - keep, vecChar.end()).swap(vecChar);
+    goto __finished;
+  }
+
   if (vecChar.size() < 2) {
     // cerr << "data is not enough!" << endl;
     goto __finished;
@@ -51,6 +61,9 @@ __find_header:
   }
 
   pf = (frame_t *)&vecChar[0];
+  if (pf->frame_head.frame_data_len < FRAME_HEAD_DATA_SIZE) {
+    goto __find_header;
+  }
   frame_payload_len = pf->frame_head.frame_data_len - FRAME_HEAD_DATA_SIZE;
 
   /* max frame payload size */
@@ -82,6 +95,9 @@ __find_header:
   }
 
   pf = (frame_t *)malloc(sizeof(frame_t) + frame_payload_len);
+  if (!pf) {
+    goto __finished;
+  }
   memcpy(pf, &vecChar[0], sizeof(frame_t) + frame_payload_len);
 
   std::vector<uint8_t>(it + FRAME_HEAD_SIZE + frame_payload_len +

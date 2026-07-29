@@ -1,7 +1,11 @@
 #include <cv_bridge/cv_bridge.hpp>
 
+#include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <iostream>
+#include <mutex>
+#include <thread>
 #include <opencv2/opencv.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/image.hpp>
@@ -19,6 +23,24 @@ extern frame_t *handle_process(std::string s);
 
 using namespace std::chrono_literals;
 
+// ---------------------------------------------------------------------------
+// Hardware variant: set to 1 if your MaixSense unit has the onboard LCD,
+// or 0 if it does not (e.g. a screenless module).
+//
+// AT+DISP=<n> is a bitfield of output targets: bit0=LCD, bit1=USB, bit2=UART.
+// The frame stream this driver reads travels over the USB bit (bit1), so it
+// stays enabled in both cases; the macro only toggles the LCD bit (bit0).
+// ---------------------------------------------------------------------------
+#define MAIXSENSE_HAS_DISPLAY 0
+
+#if MAIXSENSE_HAS_DISPLAY
+#define AT_DISP_INIT "AT+DISP=1\r"    // config phase: LCD on
+#define AT_DISP_STREAM "AT+DISP=3\r"  // stream: LCD + USB
+#else
+#define AT_DISP_INIT "AT+DISP=0\r"    // config phase: no LCD
+#define AT_DISP_STREAM "AT+DISP=2\r"  // stream: USB only
+#endif
+
 class SipeedTOF_MSA010_Publisher : public rclcpp::Node {
 #define ser (*pser)
  private:
@@ -34,29 +56,19 @@ class SipeedTOF_MSA010_Publisher : public rclcpp::Node {
     pser = new Serial(s);
     std::cout << "use device: " << s << std::endl;
 
-    ser << "AT+ISP=0\r";
-    do {
-      ser >> s;
-      std::cout << "AT+ISP=0: get dummy: " << s.size() << "\r";
-    } while(!s.empty());
-    std::cout << std::endl;
-    std::cout << "finish: " << "AT+ISP=0" << std::endl;
+    // A previous run may have left the camera streaming (DISP on). Stop it
+    // first; otherwise the drains below never see silence and loop forever.
+    ser << "AT+DISP=0\r";
+    drain("AT+DISP=0");
 
-    ser << "AT+DISP=1\r";
-    do {
-      ser >> s;
-      std::cout << "AT+DISP=1: get dummy: " << s.size() << "\r";
-    } while(!s.empty());
-    std::cout << std::endl;
-    std::cout << "finish: " << "AT+DISP=1" << std::endl;
+    ser << "AT+ISP=0\r";
+    drain("AT+ISP=0");
+
+    ser << AT_DISP_INIT;
+    drain("AT+DISP(init)");
 
     ser << "AT+ISP=1\r";
-    do {
-      ser >> s;
-      std::cout << "AT+ISP=1: get dummy: " << s.size() << "\r";
-    } while(!s.empty());
-    std::cout << std::endl;
-    std::cout << "finish: " << "AT+ISP=1 " << s << std::endl;
+    drain("AT+ISP=1");
 
     ser << "AT\r";
     ser >> s;
@@ -100,7 +112,7 @@ class SipeedTOF_MSA010_Publisher : public rclcpp::Node {
     /* do not delete it. It is waiting */
     ser >> s;
 
-    ser << "AT+DISP=3\r";
+    ser << AT_DISP_STREAM;
     ser >> s;
     if (s.compare("OK\r\n")) {
       // not this serial port
@@ -113,28 +125,88 @@ class SipeedTOF_MSA010_Publisher : public rclcpp::Node {
         this->create_publisher<sensor_msgs::msg::PointCloud2>("cloud", 10);
     timer_ = this->create_wall_timer(
         30ms, std::bind(&SipeedTOF_MSA010_Publisher::timer_callback, this));
+
+    // Dedicated reader thread: it continuously drains the serial port and
+    // keeps only the newest frame. This decouples reading from the heavy
+    // point-cloud work in timer_callback, so the kernel buffer never backs up
+    // and the camera stream never stalls.
+    running_ = true;
+    reader_thread_ = std::thread(&SipeedTOF_MSA010_Publisher::read_loop, this);
   }
 
-  ~SipeedTOF_MSA010_Publisher() {}
+  ~SipeedTOF_MSA010_Publisher() {
+    running_ = false;
+    if (reader_thread_.joinable()) {
+      reader_thread_.join();
+    }
+    std::lock_guard<std::mutex> lock(frame_mutex_);
+    if (latest_frame_) {
+      free(latest_frame_);
+      latest_frame_ = nullptr;
+    }
+  }
 
  private:
   rclcpp::TimerBase::SharedPtr timer_;
+  std::thread reader_thread_;
+  std::atomic<bool> running_{false};
+  std::mutex frame_mutex_;
+  frame_t *latest_frame_ = nullptr;
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr publisher_depth;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr
       publisher_pointcloud;
 
-  void timer_callback() {
+  // Drain pending bytes from the serial port. Bounded by max_reads so a
+  // camera left streaming by a previous launch cannot hang us forever:
+  // it stops at the first idle read (empty) or after max_reads attempts.
+  void drain(const char *label, int max_reads = 64) {
     std::string s;
-    std::stringstream sstream;
-    frame_t *f;
-  _more:
-    ser >> s;
-    if (s.empty()) {
-      return;
+    for (int i = 0; i < max_reads; i++) {
+      ser >> s;
+      std::cout << label << ": drain " << i << " size: " << s.size() << "\r";
+      if (s.empty()) break;
     }
-    f = handle_process(s);
+    std::cout << std::endl;
+    std::cout << "finish: " << label << std::endl;
+  }
+
+  // Reader thread body: continuously drains the serial port, parses every
+  // complete frame and publishes only the newest into latest_frame_ (older
+  // ones are dropped). Runs until running_ is cleared in the destructor.
+  void read_loop() {
+    std::string s;
+    while (running_) {
+      ser >> s;
+      if (s.empty()) {
+        continue;
+      }
+      std::string chunk = s;
+      frame_t *f = nullptr;
+      while ((f = handle_process(chunk)) != nullptr) {
+        std::lock_guard<std::mutex> lock(frame_mutex_);
+        if (latest_frame_) {
+          free(latest_frame_);  // drop stale frame, keep only the newest
+        }
+        latest_frame_ = f;
+        chunk.clear();  // subsequent calls only drain the static buffer
+      }
+    }
+  }
+
+  void timer_callback() {
+    std::stringstream sstream;
+
+    // Grab the newest frame produced by the reader thread (if any) and take
+    // ownership of it; publishing/point-cloud work then happens off the
+    // serial path so it can never stall reading.
+    frame_t *f = nullptr;
+    {
+      std::lock_guard<std::mutex> lock(frame_mutex_);
+      f = latest_frame_;
+      latest_frame_ = nullptr;
+    }
     if (!f) {
-      goto _more;
+      return;
     }
     // cout << f << endl;
     uint8_t rows, cols, *depth;
@@ -147,7 +219,7 @@ class SipeedTOF_MSA010_Publisher : public rclcpp::Node {
 
     std_msgs::msg::Header header;
     header.stamp = this->get_clock()->now();
-    header.frame_id = "tof";
+    header.frame_id = "camera_link_optical";
 
     sensor_msgs::msg::Image msg_depth =
         *cv_bridge::CvImage(header, "mono8", md).toImageMsg().get();
